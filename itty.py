@@ -24,16 +24,12 @@ import cgi
 import mimetypes
 import os
 import re
-import StringIO
+import io
 import sys
 import traceback
-try:
-    from urlparse import parse_qs
-except ImportError:
-    from cgi import parse_qs
 
 __author__ = 'Daniel Lindsley'
-__version__ = ('0', '8', '1')
+__version__ = ('1', '0', '0')
 __license__ = 'BSD'
 
 
@@ -131,7 +127,7 @@ class Redirect(RequestError):
 
     def __init__(self, url):
         self.url = url
-        self.args = ["Redirecting to '%s'..." % self.url]
+        self.args = ["Redirecting to '{}'...".format(self.url)]
 
 
 class lazyproperty(object):
@@ -144,7 +140,7 @@ class lazyproperty(object):
             return self
 
         value = self._function(obj)
-        setattr(obj, self._function.func_name, value)
+        setattr(obj, self._function.__name__, value)
         return value
 
 
@@ -194,7 +190,7 @@ class Request(object):
 
     def build_get_dict(self):
         """Takes GET data and rips it apart into a dict."""
-        raw_query_dict = parse_qs(self.query, keep_blank_values=1)
+        raw_query_dict = cgi.parse_qs(self.query, keep_blank_values=1)
         query_dict = {}
 
         for key, value in raw_query_dict.items():
@@ -209,7 +205,7 @@ class Request(object):
 
     def build_complex_dict(self):
         """Takes POST/PUT data and rips it apart into a dict."""
-        raw_data = cgi.FieldStorage(fp=StringIO.StringIO(self.body), environ=self._environ)
+        raw_data = cgi.FieldStorage(fp=io.BytesIO(self.body), environ=self._environ)
         query_dict = {}
 
         for field in raw_data:
@@ -242,42 +238,28 @@ class Response(object):
         self.headers.append((key, value))
 
     def send(self, start_response):
-        status = "%d %s" % (self.status, HTTP_MAPPINGS.get(self.status))
-        headers = [('Content-Type', "%s; charset=utf-8" % self.content_type)] + self.headers
-        final_headers = []
+        status = "{} {}".format(self.status, HTTP_MAPPINGS.get(self.status))
+        headers = [
+            ('Content-Type', "{}; charset=utf-8".format(self.content_type))
+        ] + self.headers
+        start_response(status, headers)
 
-        # Because Unicode is unsupported...
-        for header in headers:
-            final_headers.append((self.convert_to_ascii(header[0]), self.convert_to_ascii(header[1])))
-
-        start_response(status, final_headers)
-
-        if isinstance(self.output, unicode):
-            return self.output.encode('utf-8')
-        else:
-            return self.output
-
-    def convert_to_ascii(self, data):
-        if isinstance(data, unicode):
-            try:
-                return data.encode('us-ascii')
-            except UnicodeError, e:
-                raise
-        else:
-            return str(data)
+        if isinstance(self.output, str):
+            return [self.output.encode('utf-8')]
+        return [self.output]
 
 
 def handle_request(environ, start_response):
     """The main handler. Dispatches to the user's code."""
     try:
         request = Request(environ, start_response)
-    except Exception, e:
+    except Exception as e:
         return handle_error(e)
 
     try:
         (re_url, url, callback), kwargs = find_matching_url(request)
         response = callback(request, **kwargs)
-    except Exception, e:
+    except Exception as e:
         return handle_error(e, request)
 
     if not isinstance(response, Response):
@@ -293,7 +275,7 @@ def handle_error(exception, request=None):
 
     if not getattr(exception, 'hide_traceback', False):
         (e_type, e_value, e_tb) = sys.exc_info()
-        message = "%s occurred on '%s': %s\nTraceback: %s" % (
+        message = "{} occurred on '{}': {}\nTraceback: {}".format(
             exception.__class__,
             request._environ['PATH_INFO'],
             exception,
@@ -315,7 +297,8 @@ def handle_error(exception, request=None):
 def find_matching_url(request):
     """Searches through the methods who've registed themselves with the HTTP decorators."""
     if not request.method in REQUEST_MAPPINGS:
-        raise NotFound("The HTTP request method '%s' is not supported." % request.method)
+        raise NotFound(
+                "The HTTP request method '{}' is not supported.".format(request.method))
 
     for url_set in REQUEST_MAPPINGS[request.method]:
         match = url_set[0].search(request.path)
@@ -405,7 +388,7 @@ def get(url):
     """Registers a method as capable of processing GET requests."""
     def wrapped(method):
         # Register.
-        re_url = re.compile("^%s$" % add_slash(url))
+        re_url = re.compile("^{}$".format(add_slash(url)))
         REQUEST_MAPPINGS['GET'].append((re_url, url, method))
         return method
     return wrapped
@@ -415,7 +398,7 @@ def post(url):
     """Registers a method as capable of processing POST requests."""
     def wrapped(method):
         # Register.
-        re_url = re.compile("^%s$" % add_slash(url))
+        re_url = re.compile("^{}$".format(add_slash(url)))
         REQUEST_MAPPINGS['POST'].append((re_url, url, method))
         return method
     return wrapped
@@ -425,8 +408,9 @@ def put(url):
     """Registers a method as capable of processing PUT requests."""
     def wrapped(method):
         # Register.
-        re_url = re.compile("^%s$" % add_slash(url))
+        re_url = re.compile("^{}$".format(add_slash(url)))
         REQUEST_MAPPINGS['PUT'].append((re_url, url, method))
+        # XXX wtf is that 'new'?
         new.status = 201
         return method
     return wrapped
@@ -436,7 +420,7 @@ def delete(url):
     """Registers a method as capable of processing DELETE requests."""
     def wrapped(method):
         # Register.
-        re_url = re.compile("^%s$" % add_slash(url))
+        re_url = re.compile("^{}$".format(add_slash(url)))
         REQUEST_MAPPINGS['DELETE'].append((re_url, url, method))
         return method
     return wrapped
@@ -549,7 +533,10 @@ def gunicorn_adapter(host, port):
     if version_info < (0, 9, 0):
         from gunicorn.arbiter import Arbiter
         from gunicorn.config import Config
-        arbiter = Arbiter(Config({'bind': "%s:%d" % (host, int(port)), 'workers': 4}), handle_request)
+        arbiter = Arbiter(Config({
+            'bind': "{}:{}".format(host, int(port)),
+            'workers': 4
+        }), handle_request)
         arbiter.run()
     else:
         from gunicorn.app.base import Application
@@ -605,7 +592,7 @@ def run_itty(server='wsgiref', host='localhost', port=8080, config=None):
     name from WSGI_ADAPTERS to use an alternate WSGI server.
     """
     if not server in WSGI_ADAPTERS:
-        raise RuntimeError("Server '%s' is not a valid server. Please choose a different server." % server)
+        raise RuntimeError("Server '{}' is not a valid server. Please choose a different server.".format(server))
 
     if config is not None:
         # We'll let ImportErrors bubble up.
@@ -616,12 +603,12 @@ def run_itty(server='wsgiref', host='localhost', port=8080, config=None):
 
     # AppEngine seems to echo everything, even though it shouldn't. Accomodate.
     if server != 'appengine':
-        print 'itty starting up (using %s)...' % server
-        print 'Listening on http://%s:%s...' % (host, port)
-        print 'Use Ctrl-C to quit.'
-        print
+        print('itty starting up (using {})...'.format(server))
+        print('Listening on http://{}:{}...'.format(host, port))
+        print('Use Ctrl-C to quit.')
+        print()
 
     try:
         WSGI_ADAPTERS[server](host, port)
     except KeyboardInterrupt:
-        print 'Shutting down. Have a nice day!'
+        print('Shutting down. Have a nice day!')
